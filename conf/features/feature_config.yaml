@@ -1,0 +1,147 @@
+# conf/features/feature_config.yaml
+
+global_settings:
+  processed_data_path: "data/1_interim/"
+  feature_output_path: "data/2_processed/"
+
+feature_generators:
+    user_behavior: # 用户全局特征
+      enabled: true
+      module: ".user_behavior_features"
+      class: "UserBehaviorFeatures"
+      params:
+        # 行为统计的时间窗口 (天)
+        windows_days: [1, 3, 7, 15, 30]
+        # 行为统计的更细粒度时间窗口 (小时) - 用于捕捉近期极短时行为
+        hour_windows: [1, 3, 6, 12, 24] # 24小时即1天，与 windows_days 的 1 重叠，但分开定义更清晰
+        # 要统计的行为类型
+        behavior_types: [1, 2, 3, 4] # 1:浏览, 2:收藏, 3:加购, 4:购买
+        # 时间衰减参数 (lambda for exp(-lambda * delta_hours))
+        time_decay_lambda: 0.01
+        generate_decayed_counts: true
+        # 是否统计不同时间窗口内交互过的独立物品/类别数量
+        generate_distinct_item_counts: true
+        generate_distinct_category_counts: true
+        # 是否计算用户全局的转化率特征
+        generate_conversion_rates: true # 例如：浏览->加购，加购->购买 等
+        # 用户活跃度特征
+        generate_activity_features: true # 例如：活跃天数，平均每日/每周行为次数
+        # Session 相关特征 (如果启用，会增加复杂度，初期可设为 false)
+        generate_session_features: false # 初期可以先禁用
+        session_timeout_minutes: 30    # Session 切分阈值 (分钟)
+
+    item_dynamic: # 物品全局特征 (流行度)
+      enabled: false
+      module: ".item_dynamic_features"
+      class: "ItemDynamicFeatures"
+      params:
+        windows_days: [1, 3, 7, 15, 30]
+        behavior_types: [1, 2, 3, 4]
+        time_decay_lambda: 0.01
+        generate_decayed_counts: true
+        generate_distinct_user_counts: true
+        generate_conversion_rates: true
+
+    user_item_interaction: # (用户, 物品) 对的特定特征
+      enabled: false
+      module: ".user_item_interaction_features"
+      class: "UserItemInteractionFeatures"
+      params:
+        windows_days: [1, 3, 7]
+        hour_windows: [1, 3, 6, 12]
+        behavior_types: [1, 2, 3, 4]
+        time_decay_lambda: 0.005
+        generate_decayed_counts: true
+        time_since_last_interaction_types: [1, 2, 3, 4]
+        first_last_behavior_on_item: true
+
+    user_category: # 用户与候选物品所属类别的交互特征
+      enabled: false
+      module: ".user_category_features"
+      class: "UserCategoryFeatures"
+      params:
+        windows_days: [1, 3, 7, 15, 30]
+        behavior_types: [1, 2, 3, 4]
+        time_decay_lambda: 0.01
+        generate_decayed_counts: true
+
+    temporal: # 与预测时间相关的特征
+      enabled: true
+      module: ".temporal_features"
+      class: "TemporalFeatures"
+      params:
+        include_hour_of_day: true
+        include_day_of_week: true
+        include_is_weekend: true
+
+    special_day: # "双12" 特征
+      enabled: false
+      module: ".special_day_features"
+      class: "SpecialDayFeatures"
+      params:
+        event_date_str: "2014-12-12"
+        days_before_event_windows: [1, 2, 3]
+        days_after_event_windows: [1, 2]
+        days_from_event_prediction_day: true
+
+    life_cycle: # 用户/物品 首次/末次 已知交互
+      enabled: false
+      module: ".life_cycle_features"
+      class: "LifeCycleFeatures"
+      params:
+        user_first_last_interaction: true
+        item_first_last_interaction: true
+        user_item_first_last_interaction: true
+
+    geohash: # 基础 geohash 特征
+      enabled: false
+      module: ".geohash_features"
+      class: "GeoHashFeatures"
+      params:
+        user_common_geohash_prefix: [5, 6]
+        item_geohash_prefix: [5, 6]
+        match_user_item_geohash_prefix: [5, 6]
+
+    rank_features: # 基于排名的特征
+      enabled: false
+      module: ".rank_features"
+      class: "RankFeatures"
+      params:
+        user_rank_window_days: 7
+        user_item_rank_metrics:
+          - {metric_name: "ui_interaction_count_total", behavior_types: [1,2,3,4], agg: "sum" }
+          - {metric_name: "ui_purchase_count", behavior_types: [4], agg: "sum" }
+          - {metric_name: "ui_add_cart_count", behavior_types: [3], agg: "sum" }
+          - {metric_name: "ui_last_interaction_time", time_based: true }
+        global_item_rank_window_days: 7
+        global_item_rank_metrics:
+          - {metric_name: "item_glob_purchase_count", behavior_types: [4], agg: "sum"}
+          - {metric_name: "item_glob_interaction_count", behavior_types: [1,2,3,4], agg: "sum"}
+
+    target_encode:
+      enabled: true 
+      module: ".target_encode_features"
+      class: "TargetEncodeFeatures"
+      params:
+        alpha: 20 # 平滑因子
+        cv_folds: 5 # 交叉验证折数 (仅用于 is_training_run=True)
+        # features_to_encode 定义了要编码的列或列组合
+        # 列名应为其他特征生成器已生成的列，或原始数据中的列
+        features_to_encode:
+          - ['item_category'] # 对 item_category 列进行编码
+          - ['user_id'] # 对高基数ID类特征进行TE要非常小心，容易过拟合，通常用于User Embedding的替代
+          # 示例：假设你有一个特征叫 user_segment (由其他生成器产生)
+          # - ['user_segment']
+          # 示例：对 user_id 和 item_category 的组合进行编码 (通常很强大)
+          #- ['user_id', 'item_category'] # 注意：这个组合的基数可能非常大
+                                        # 需要确保平滑和CV能有效工作
+        # learned_encodings_dir: "models/rank/target_encodings/" # 可以移到 global_settings 或硬编码
+
+# DeepFM 相关特征生成 (在 DeepFM 训练完成并在此处启用后使用)
+# deepfm_extractor:
+#   enabled: false
+#   module: ".deepfm_feature_extractor"
+#   class: "DeepFMExtractor"
+#   params:
+#     model_load_path: "models/deepfm/deepfm_model_main.h5"
+#     extraction_type: 'prediction'

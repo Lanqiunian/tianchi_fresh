@@ -1,0 +1,52 @@
+# conf/recall/recall_config.yaml
+
+global_settings:
+  processed_data_path: "data/1_interim/"
+  recall_output_path: "data/1_interim/"
+  num_test_users_for_run_recall: 1000000 
+  user_candidate_limit: 200
+  target_prediction_date: "2014-12-18" # 预测日期
+
+strategies:
+  recent_high_intent:
+    enabled: true
+    module: "src.recall.strategies.recent_high_intent_strategy" # 注意这里路径变化
+    class: "RecentHighIntentStrategy"
+    params:
+      days_window: 7
+      behavior_types: [1, 2, 3] # 2:收藏, 3:加购物车
+      behavior_weights: {
+        3: 1.0,  # 比如 behavior_type 3 是 '加购'
+        2: 0.7,  # behavior_type 2 是 '收藏'
+        1: 0.3   # behavior_type 1 是 '点击'
+        # 其他不关心的行为类型可以不配置，它们不会被召回
+        }
+      top_n_recall: 50
+      
+  item_cf:
+    enabled: true
+    module: "src.recall.strategies.itemcf_strategy" 
+    class: "ItemCFRecallStrategy"
+    params:
+      similarity_matrix_filename: "itemcf_similarity_prod.pkl" # 相似度矩阵文件名 (不含路径)
+      force_recompute_similarity: false # 是否强制重新计算相似度矩阵 (即使文件存在)
+      days_window_user_history: 30      # 获取用户历史行为的时间窗口
+      max_user_history_items: 50        # 最多使用用户最近的N个互动商品来生成推荐
+      top_k_similar_items: 10           # 对每个历史互动商品，考虑其最相似的K个商品
+      similarity_behavior_types: [3, 4] # (可选) 用来计算物品相似度的行为类型 (例如购买, 完成观看)
+                                        # 如果不配置或为 null/None，则使用所有行为
+      user_history_behavior_types: [1, 2, 3, 4] # (可选) 视为用户有效历史行为的类型 (例如点击, 收藏, 加购, 购买)
+                                                # 如果不配置或为 null/None，则使用所有行为
+      top_n_recall: 50                  # 当前策略期望召回 N 个商品 (此值会被 run_recall.py 中的 N 覆盖)
+      offline_similarity_top_n: 100 
+
+  global_popular_items:
+    enabled: true
+    module: "src.recall.strategies.popular_items_strategy" 
+    class: "GlobalPopularItemsStrategy"
+    params:
+      days_window_for_popularity: 7
+      min_interactions_for_hot: 3 # 商品至少被交互N次才算热门
+      top_n_recall: 30
+
+  

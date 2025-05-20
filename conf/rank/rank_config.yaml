@@ -1,0 +1,105 @@
+# conf/rank/rank_config.yaml
+
+global_settings:
+  # ... (保持不变) ...
+  feature_data_path: "data/2_processed/"
+  user_log_path: "data/1_interim/processed_user_log_p_related.parquet" 
+  processed_sample_path: "data/2_processed/" 
+  model_output_path: "models/rank/"          
+  submission_output_path: "data/3_submissions/" 
+
+dataset_config:
+  # ... (train_s1, valid_s1, train_full, test_target 定义保持不变) ...
+  train_valid_split:
+    train_s1:
+      feature_file_suffix: "train_s1_20141217" 
+      behavior_data_end_date: "2014-12-16"     
+      prediction_date: "2014-12-17"            
+    valid_s1:
+      feature_file_suffix: "valid_s1_20141218"
+      behavior_data_end_date: "2014-12-17"
+      prediction_date: "2014-12-18"
+  train_full:
+    feature_file_suffix: "train_full_20141218" 
+    behavior_data_end_date: "2014-12-17"       
+    prediction_date: "2014-12-18"              
+  test_target:
+    feature_file_suffix: "test_target_20141219" 
+    behavior_data_end_date: "2014-12-18"        
+    prediction_date: "2014-12-19"               
+
+lgbm_training:
+  # --- 新增：负样本欠采样配置 (仅对训练集生效) ---
+  undersampling:
+    enabled: true             # 是否启用负样本欠采样
+    ratio: 5                  # 目标负样本数与正样本数的比例 (例如 5 表示 负:正 = 5:1)
+                              # 如果设为 null 或 <= 0, 则不进行采样
+    random_seed: 2024         # 采样时的随机种子，保证可复现性
+
+  base_params:
+    objective: 'binary'
+    metric: 'auc'        
+    boosting_type: 'gbdt'
+    n_estimators: 1000   
+    learning_rate: 0.05  
+    num_leaves: 31       
+    max_depth: -1        
+    seed: 2024           # LightGBM 内部的随机种子
+    n_jobs: -1           
+    verbose: 1         
+    device_type: 'cpu'   
+
+    # scale_pos_weight: 将根据采样后的数据自动计算，或如果采样比例固定，可设为固定值
+    scale_pos_weight: auto  
+    min_child_weight: 1e-3  # LightGBM 默认值，可以先用这个，如果还有问题再尝试更小如 1e-5
+
+  early_stopping_rounds: 50
+
+  optuna_tuning:
+    enabled: true        
+    n_trials: 1        # 调试时减少试验次数
+    direction: "maximize"   
+    objective_metric: "f1" 
+    param_distributions:
+      learning_rate: { type: "float", low: 0.01, high: 0.1, log: true }
+      num_leaves: { type: "int", low: 20, high: 150 }
+      feature_fraction: { type: "float", low: 0.6, high: 0.95 }
+      bagging_fraction: { type: "float", low: 0.6, high: 0.95 }
+      bagging_freq: { type: "int", low: 1, high: 7 }           
+      min_child_samples: { type: "int", low: 10, high: 100 } # 可以从较小值开始尝试
+      lambda_l1: { type: "float", low: 1e-8, high: 1.0, log: true }
+      lambda_l2: { type: "float", low: 1e-8, high: 1.0, log: true }
+      # 可选: 如果负采样后类别仍不平衡，可以让 Optuna 调优 scale_pos_weight
+      # scale_pos_weight: {type: "float", low: 1.0, high: 20.0} # 范围会比之前小很多
+
+model_ensemble:
+  enabled: false # 是否启用模型融合，例如Bagging
+  method: "bagging_average" # 当前支持 "bagging_average"
+  bagging_params:
+    n_models: 5             # Bagging时训练多少个不同随机种子的模型
+    # random_seeds: [2024, 1024, 888, 666, 123] # 可以指定种子列表，或由LGBMTrainer内部逻辑生成
+
+prediction:
+  # F1 阈值优化配置 (在验证集上进行，用于最终模型和Optuna内部评估)
+  f1_threshold_optimization:
+    enabled: true # 是否对最终模型在验证集上进行F1阈值优化
+    search_range_start: 0.01  # 用于最终模型F1阈值搜索的起始值
+    search_range_end: 0.50    # 用于最终模型F1阈值搜索的结束值
+    search_step: 0.005        # 用于最终模型F1阈值搜索的步长
+
+    # (可选) 为Optuna内部的F1阈值搜索提供不同（可能更粗略或更快）的参数
+    search_range_start_optuna: 0.001
+    search_range_end_optuna: 0.99 # 扩大范围以观察概率分布
+    search_step_optuna: 0.01
+
+  # 提交文件名前缀
+  submission_file_prefix: "submission_lgbm"
+
+# 在送入LGBM模型前，从特征DataFrame中排除的列名列表
+# (除了 'user_id', 'item_id', 'label' 这些已经由LGBMTrainer内部处理的)
+# 例如，某些中间特征或召回源信息可能不适合直接作为排序模型的输入
+exclude_features_from_model:
+  - "recall_source"
+  - "recall_score"
+  # - "datetime" # 如果原始的datetime对象列还存在且未转换
+  # - "time"     # 如果原始的时间字符串列还存在
