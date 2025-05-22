@@ -6,7 +6,7 @@ import gc
 from .feature_generator_base import FeatureGeneratorBase
 from .feature_utils import time_decay_weight, safe_division, split_into_sessions
 
-class UserBehaviorFeatures(FeatureGeneratorBase):
+class UserBehaviorFeatures(FeatureGeneratorBase):    
     def __init__(self, generator_name: str,
                  generator_specific_config: dict,
                  global_feature_engineering_config: dict,
@@ -29,23 +29,46 @@ class UserBehaviorFeatures(FeatureGeneratorBase):
         self.gen_session_features = self.params.get("generate_session_features", False)
         self.time_decay_lambda = self.params.get("time_decay_lambda", 0.01)
         self.session_timeout_minutes = self.params.get("session_timeout_minutes", 30)
+        
+        # 确认是否有全量数据（通过检查是否有is_p_item标记列）
+        self.has_full_data = 'is_p_item' in self.user_log_df.columns
+        if self.has_full_data:
+            print(f"  发现全量用户行为数据（包含商品子集P标记），将利用全部商品行为构建更强大的用户特征！")
+        else:
+            print(f"  未发现全量数据标记，仅使用现有数据构建特征。")
+            
+        # 额外启用商品全集特征
+        self.gen_cross_subset_features = self.params.get("generate_cross_subset_features", True) and self.has_full_data
 
         all_possible_names = self._get_all_expected_feature_names()
         for name in all_possible_names:
-            self._add_feature_name(name)
-
+            self._add_feature_name(name)    
     def _get_all_expected_feature_names(self) -> list:
         temp_feature_names = []
         time_windows_config = [(d, 'd') for d in self.windows_days] + \
                               [(h, 'h') for h in self.hour_windows]
 
         for window_val, window_unit in time_windows_config:
+            # 基础行为特征
             for b_type in self.behavior_types:
                 temp_feature_names.append(f"user_cnt_b{b_type}_last_{window_val}{window_unit}")
+                # 如果有全量数据且需要生成跨子集特征，添加P集与非P集特征
+                if hasattr(self, 'has_full_data') and self.has_full_data:
+                    temp_feature_names.append(f"user_cnt_p_b{b_type}_last_{window_val}{window_unit}")  # P集合行为
+                    temp_feature_names.append(f"user_cnt_non_p_b{b_type}_last_{window_val}{window_unit}")  # 非P集合行为
+                
                 if self.gen_decayed_counts:
                     temp_feature_names.append(f"user_decayed_cnt_b{b_type}_last_{window_val}{window_unit}")
+                    
+            # 商品多样性特征
             if self.gen_distinct_item_counts:
                 temp_feature_names.append(f"user_distinct_items_last_{window_val}{window_unit}")
+                # P集合与非P集合的多样性特征
+                if hasattr(self, 'has_full_data') and self.has_full_data:
+                    temp_feature_names.append(f"user_distinct_p_items_last_{window_val}{window_unit}")
+                    temp_feature_names.append(f"user_distinct_non_p_items_last_{window_val}{window_unit}")
+            
+            # 类别多样性特征
             if self.gen_distinct_category_counts:
                 temp_feature_names.append(f"user_distinct_categories_last_{window_val}{window_unit}")
 
@@ -88,9 +111,7 @@ class UserBehaviorFeatures(FeatureGeneratorBase):
         feature_cols_init = self.get_generated_feature_names()
         # Create a DataFrame with 0.0s directly, more efficient
         final_user_features_df = pd.DataFrame(0.0, index=unique_user_ids_series, columns=feature_cols_init)
-        final_user_features_df.index.name = 'user_id'
-
-
+        final_user_features_df.index.name = 'user_id'        
         user_log_for_features = self.user_log_df[
             (self.user_log_df['user_id'].isin(unique_user_ids_series)) &
             (self.user_log_df['datetime'] <= behavior_end_date)
@@ -99,7 +120,15 @@ class UserBehaviorFeatures(FeatureGeneratorBase):
         if user_log_for_features.empty:
             print("    没有找到相关用户的历史行为日志，UserBehaviorFeatures 将主要为0。")
             return final_user_features_df.reset_index() # Ensure user_id is a column
-
+            
+        # 检查是否有全量数据
+        has_full_data = 'is_p_item' in user_log_for_features.columns
+        if has_full_data:
+            p_related_count = user_log_for_features['is_p_item'].sum()
+            total_count = len(user_log_for_features)
+            p_ratio = p_related_count / total_count if total_count > 0 else 0
+            print(f"    使用全量用户行为数据：总行为 {total_count}，P相关行为 {p_related_count} ({p_ratio:.2%})")
+        
         if self.gen_decayed_counts:
             user_log_for_features['delta_hours'] = \
                 (behavior_end_date - user_log_for_features['datetime']).dt.total_seconds() / 3600
@@ -109,8 +138,7 @@ class UserBehaviorFeatures(FeatureGeneratorBase):
         gc.collect()
 
         time_windows_config = [(d, 'd', pd.Timedelta(days=d)) for d in self.windows_days] + \
-                              [(h, 'h', pd.Timedelta(hours=h)) for h in self.hour_windows]
-
+                              [(h, 'h', pd.Timedelta(hours=h)) for h in self.hour_windows]        
         for window_val, window_unit, timedelta_obj in tqdm(time_windows_config, desc="  UF: Processing time windows", total=len(time_windows_config)):
             window_start_time = behavior_end_date - timedelta_obj + pd.Timedelta(seconds=1)
             log_in_window = user_log_for_features[
@@ -122,25 +150,70 @@ class UserBehaviorFeatures(FeatureGeneratorBase):
 
             grouped_by_user_in_window = log_in_window.groupby('user_id')
 
+            # 检查是否有全量数据(包含P标记)
+            has_p_marker = 'is_p_item' in log_in_window.columns
+            
+            # 处理行为计数特征(支持全集与P子集区分)
             for b_type in self.behavior_types:
+                # 全量数据的行为计数
+                all_behavior_log = log_in_window[log_in_window['behavior_type'] == b_type]
                 feat_name_count = f"user_cnt_b{b_type}_last_{window_val}{window_unit}"
-                counts = log_in_window[log_in_window['behavior_type'] == b_type].groupby('user_id').size()
+                counts = all_behavior_log.groupby('user_id').size()
                 if not counts.empty:
                     final_user_features_df[feat_name_count] = final_user_features_df[feat_name_count].add(counts, fill_value=0)
+                    
+                # 如果有全量数据，同时计算P相关与非P相关的行为计数
+                if has_p_marker:
+                    # 仅P集合相关的行为计数
+                    p_behavior_log = all_behavior_log[all_behavior_log['is_p_item'] == 1]
+                    feat_name_p_count = f"user_cnt_p_b{b_type}_last_{window_val}{window_unit}"
+                    p_counts = p_behavior_log.groupby('user_id').size()
+                    if not p_counts.empty and feat_name_p_count in final_user_features_df.columns:
+                        final_user_features_df[feat_name_p_count] = final_user_features_df[feat_name_p_count].add(p_counts, fill_value=0)
+                        
+                    # 非P集合的行为计数(一般商品上的行为对预测P集合的用户偏好也有价值)
+                    non_p_behavior_log = all_behavior_log[all_behavior_log['is_p_item'] == 0]
+                    feat_name_non_p_count = f"user_cnt_non_p_b{b_type}_last_{window_val}{window_unit}"
+                    non_p_counts = non_p_behavior_log.groupby('user_id').size()
+                    if not non_p_counts.empty and feat_name_non_p_count in final_user_features_df.columns:
+                        final_user_features_df[feat_name_non_p_count] = final_user_features_df[feat_name_non_p_count].add(non_p_counts, fill_value=0)
 
+            # 时间衰减特征
             if self.gen_decayed_counts and 'decay_weight' in log_in_window.columns:
                 for b_type in self.behavior_types:
+                    all_behavior_log = log_in_window[log_in_window['behavior_type'] == b_type]
                     feat_name_decayed = f"user_decayed_cnt_b{b_type}_last_{window_val}{window_unit}"
-                    decayed_counts = log_in_window[log_in_window['behavior_type'] == b_type].groupby('user_id')['decay_weight'].sum()
+                    decayed_counts = all_behavior_log.groupby('user_id')['decay_weight'].sum()
                     if not decayed_counts.empty:
                         final_user_features_df[feat_name_decayed] = final_user_features_df[feat_name_decayed].add(decayed_counts, fill_value=0)
 
+            # 商品多样性特征
             if self.gen_distinct_item_counts:
                 feat_name_items = f"user_distinct_items_last_{window_val}{window_unit}"
                 distinct_items = grouped_by_user_in_window['item_id'].nunique()
                 if not distinct_items.empty:
                     final_user_features_df[feat_name_items] = final_user_features_df[feat_name_items].add(distinct_items, fill_value=0)
+                
+                # 如果有全量数据，计算P相关和非P相关的商品多样性
+                if has_p_marker:
+                    p_log_in_window = log_in_window[log_in_window['is_p_item'] == 1]
+                    non_p_log_in_window = log_in_window[log_in_window['is_p_item'] == 0]
+                    
+                    if not p_log_in_window.empty:
+                        p_grouped = p_log_in_window.groupby('user_id')
+                        feat_name_p_items = f"user_distinct_p_items_last_{window_val}{window_unit}"
+                        p_distinct_items = p_grouped['item_id'].nunique()
+                        if not p_distinct_items.empty and feat_name_p_items in final_user_features_df.columns:
+                            final_user_features_df[feat_name_p_items] = final_user_features_df[feat_name_p_items].add(p_distinct_items, fill_value=0)
+                    
+                    if not non_p_log_in_window.empty:
+                        non_p_grouped = non_p_log_in_window.groupby('user_id')
+                        feat_name_non_p_items = f"user_distinct_non_p_items_last_{window_val}{window_unit}"
+                        non_p_distinct_items = non_p_grouped['item_id'].nunique()
+                        if not non_p_distinct_items.empty and feat_name_non_p_items in final_user_features_df.columns:
+                            final_user_features_df[feat_name_non_p_items] = final_user_features_df[feat_name_non_p_items].add(non_p_distinct_items, fill_value=0)
 
+            # 类别多样性特征
             if self.gen_distinct_category_counts:
                 feat_name_cats = f"user_distinct_categories_last_{window_val}{window_unit}"
                 distinct_cats = grouped_by_user_in_window['item_category'].nunique()

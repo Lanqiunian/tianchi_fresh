@@ -3,7 +3,9 @@
 global_settings:
   # ... (保持不变) ...
   feature_data_path: "data/2_processed/"
-  user_log_path: "data/1_interim/processed_user_log_p_related.parquet" 
+  # 用户行为数据路径 - 优先使用全量数据
+  user_log_all_path: "data/1_interim/processed_user_log_all.parquet"  # 包含全集I上的行为
+  user_log_path: "data/1_interim/processed_user_log_p_related.parquet"  # 仅P子集相关的行为(兼容旧版) 
   processed_sample_path: "data/2_processed/" 
   model_output_path: "models/rank/"          
   submission_output_path: "data/3_submissions/" 

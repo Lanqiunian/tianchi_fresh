@@ -86,12 +86,23 @@ def generate_all_features(
     all_generator_configs = fe_config_total.get("feature_generators", {})
     processed_data_dir = os.path.join(project_root_path, global_fe_settings.get("processed_data_path", "data/1_interim/"))
     feature_output_dir = os.path.join(project_root_path, global_fe_settings.get("feature_output_path", "data/2_processed/"))
-    os.makedirs(feature_output_dir, exist_ok=True)
-
-    # 2. 加载基础数据
+    os.makedirs(feature_output_dir, exist_ok=True)    # 2. 加载基础数据
     print("  正在加载基础 DataFrame...")
     try:
-        user_log_df = pd.read_parquet(os.path.join(processed_data_dir, "processed_user_log_p_related.parquet"))
+        # 尝试加载全量用户行为数据（包含所有商品集I上的行为）
+        user_log_all_path = os.path.join(processed_data_dir, "processed_user_log_all.parquet")
+        p_related_log_path = os.path.join(processed_data_dir, "processed_user_log_p_related.parquet")
+        
+        # 优先使用全量数据，如果不存在则回退到仅P相关的数据
+        if os.path.exists(user_log_all_path):
+            print("  加载全量用户行为数据（包含商品全集I上的行为）...")
+            user_log_df = pd.read_parquet(user_log_all_path)
+            print(f"  成功加载全量用户行为数据，利用更广泛的用户行为构建特征！")
+        else:
+            print("  未找到全量用户行为数据，回退到仅使用P相关数据...")
+            user_log_df = pd.read_parquet(p_related_log_path)
+            print(f"  注意: 仅使用P子集相关数据可能会限制模型表现。考虑重新运行数据处理模块生成全量数据。")
+        
         if 'datetime' not in user_log_df.columns and 'time' in user_log_df.columns:
              user_log_df['datetime'] = pd.to_datetime(user_log_df['time'])
         elif 'datetime' in user_log_df.columns and not pd.api.types.is_datetime64_any_dtype(user_log_df['datetime']):

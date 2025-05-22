@@ -7,7 +7,8 @@ import time # 用于计时
 
 # --- 脚本配置 ---
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-RAW_DATA_PATH = os.path.join(PROJECT_ROOT, 'data', '0_raw')
+#RAW_DATA_PATH = os.path.join(PROJECT_ROOT, 'data', '0_raw')
+RAW_DATA_PATH = "D:\\BaiduSyncdisk\\tianchi\\data"
 INTERIM_DATA_PATH = os.path.join(PROJECT_ROOT, 'data', '1_interim')
 
 # 原始文件名
@@ -24,7 +25,7 @@ PROCESSED_ITEMS_FILENAME = 'processed_items.parquet'
 # 分块大小 (根据你的内存调整，例如 500万或1000万行)
 # 对于11.6亿行，32GB内存，1000万行一块，每块处理后约100MB-300MB (P相关筛选后)
 # 预计P相关行为约1亿行，最终合并时可能需要 5-10GB 内存。
-CHUNK_SIZE_CONFIG = 600_000_000
+CHUNK_SIZE_CONFIG = 400_000_000
 
 # 预定义数据类型 (基于之前的EDA和数据范围优化)
 USER_DTYPES_CONFIG = {
@@ -112,17 +113,19 @@ def process_items(raw_path, interim_path, item_file, item_dtypes, item_columns):
 def process_user_behavior(raw_path, interim_path, user_files, user_dtypes, user_columns,
                           p_item_ids_set, chunk_size):
     """
-    分块加载、清洗、筛选并保存用户行为数据。
-    只保留与商品子集 P 相关的行为。
+    分块加载、清洗和保存用户行为数据。
+    保留所有行为数据，但添加is_p_item标记，标识是否属于商品子集P。
+    同时保存仅包含P商品相关行为的数据集，以维持向后兼容。
     """
     print(f"\n--- 步骤 2: 开始处理用户行为数据 (分块大小: {chunk_size}) ---")
     start_time = time.time()
 
     if not p_item_ids_set:
-        print("  错误: 商品子集 P 为空，无法进行用户行为筛选。跳过用户行为数据处理。")
+        print("  错误: 商品子集 P 为空，无法标识商品。跳过用户行为数据处理。")
         return
 
-    all_processed_chunks = []
+    all_processed_chunks = []  # 保存所有P相关行为的数据块(兼容原有流程)
+    all_processed_full_chunks = []  # 保存所有行为的数据块
     total_original_rows = 0
     total_p_related_rows = 0
     processed_files_count = 0
@@ -157,36 +160,31 @@ def process_user_behavior(raw_path, interim_path, user_files, user_dtypes, user_
 
                 # 预处理1: 转换时间列 (必须！)
                 df_chunk_raw['datetime'] = pd.to_datetime(df_chunk_raw['time'], format='%Y-%m-%d %H')
-                # 可以考虑删除原始 'time' 列以节省内存，但datetime对象包含原始信息
-                # df_chunk_raw.drop(columns=['time'], inplace=True, errors='ignore')
-
-                # 核心步骤: 筛选与商品子集 P 相关的行为
-                df_chunk_p_related = df_chunk_raw[df_chunk_raw['item_id'].isin(p_item_ids_set)].copy()
-                # 使用 .copy() 避免 SettingWithCopyWarning，并确保后续操作在副本上进行
-                del df_chunk_raw # 及时释放原始块的内存
-                gc.collect()
-
+                
+                # 添加标记列，标识该商品是否属于子集P
+                df_chunk_raw['is_p_item'] = df_chunk_raw['item_id'].isin(p_item_ids_set).astype(int)
+                
+                # 清洗: 处理 user_geohash 缺失值 (对所有数据)
+                df_chunk_raw['user_geohash'] = df_chunk_raw['user_geohash'].fillna('UNK')
+                
+                # 保存完整的数据块(包含所有商品的行为)
+                all_processed_full_chunks.append(df_chunk_raw.copy())
+                print_memory_usage(df_chunk_raw, "处理后 df_chunk_full")
+                
+                # 兼容原有流程：筛选与商品子集 P 相关的行为
+                df_chunk_p_related = df_chunk_raw[df_chunk_raw['is_p_item'] == 1].copy()
+                
                 current_chunk_p_related_rows = len(df_chunk_p_related)
                 total_p_related_rows += current_chunk_p_related_rows
 
                 if current_chunk_p_related_rows > 0:
-                    # 清洗1: 处理 user_geohash 缺失值 (在筛选后的数据上)
-                    df_chunk_p_related.loc[:, 'user_geohash'] = df_chunk_p_related['user_geohash'].fillna('UNK')
-
-                    # 清洗2: (可选，且需谨慎) 处理重复的用户行为记录
-                    # 比赛说明购买行为的重复是不同订单，浏览行为重复常见
-                    # 暂时不执行严格去重，除非后续分析表明有必要
-                    # df_chunk_p_related.drop_duplicates(subset=[c for c in user_columns if c != 'time'] + ['datetime'], keep='first', inplace=True)
-
-                    # 添加到列表以备合并
+                    # 添加到P相关行为列表以备合并(兼容原有流程)
                     all_processed_chunks.append(df_chunk_p_related)
                     print_memory_usage(df_chunk_p_related, "处理后 df_chunk_p_related")
                 else:
                     del df_chunk_p_related # 如果筛选后为空，也释放内存
-                    gc.collect()
-
-
-                chunk_duration = time.time() - chunk_start_time
+                    gc.collect()                
+                    chunk_duration = time.time() - chunk_start_time
                 print(f"      块 {chunk_idx + 1}: 原始行={current_chunk_original_rows}, P相关行={current_chunk_p_related_rows}. 耗时: {chunk_duration:.2f} 秒.")
 
         except Exception as e:
@@ -196,32 +194,56 @@ def process_user_behavior(raw_path, interim_path, user_files, user_dtypes, user_
     if not processed_files_count:
         print("  未处理任何用户行为文件（可能文件路径错误）。")
         return
+    
+    # 保存完整的用户行为数据(包括商品全集I上的行为)
+    if all_processed_full_chunks:
+        print("\n  开始合并所有完整用户行为数据块...")
+        merge_full_start_time = time.time()
+        df_user_full = pd.concat(all_processed_full_chunks, ignore_index=True)
+        del all_processed_full_chunks
+        gc.collect()
+        merge_full_duration = time.time() - merge_full_start_time
+        print(f"  完整数据块合并完成. 耗时: {merge_full_duration:.2f} 秒.")
+        print_memory_usage(df_user_full, "最终合并的 df_user_full (所有行为)")
         
+        # 保存完整的用户行为数据
+        if 'time' in df_user_full.columns:
+            df_user_full.drop(columns=['time'], inplace=True)
+            print("  已从完整用户行为数据中移除原始 'time' 列.")
+            
+        output_full_filename = "processed_user_log_all.parquet"
+        output_full_path = os.path.join(interim_path, output_full_filename)
+        df_user_full.to_parquet(output_full_path, index=False, engine='pyarrow')
+        print(f"  处理后的完整用户行为数据已保存到: {output_full_path}")
+    else:
+        print("  未收集到任何用户行为数据。请检查数据处理逻辑或原始数据。")
+        
+    # 为兼容原有流程，继续处理P相关的数据
     if not all_processed_chunks:
         print("  未收集到任何与 P 相关的用户行为数据。请检查筛选逻辑或原始数据。")
         duration = time.time() - start_time
-        print(f"--- 用户行为数据处理完成 (无数据输出), 耗时: {duration:.2f} 秒 ---")
+        print(f"--- 用户行为数据处理完成 (无P相关数据输出), 耗时: {duration:.2f} 秒 ---")
         return
 
     # 合并所有处理过的、与P相关的块
-    print("\n  开始合并所有处理后的用户行为数据块...")
+    print("\n  开始合并所有P相关用户行为数据块...")
     merge_start_time = time.time()
     df_user_final = pd.concat(all_processed_chunks, ignore_index=True)
     del all_processed_chunks # 释放列表内存
     gc.collect()
     merge_duration = time.time() - merge_start_time
-    print(f"  数据块合并完成. 耗时: {merge_duration:.2f} 秒.")
+    print(f"  P相关数据块合并完成. 耗时: {merge_duration:.2f} 秒.")
     print_memory_usage(df_user_final, "最终合并的 df_user_final (P相关)")
 
-    # 保存最终的用户行为数据 (P相关)
+    # 保存P相关的用户行为数据 (兼容原有流程)
     # 在保存前可以确认删除原始 time 列，只保留 datetime
     if 'time' in df_user_final.columns:
          df_user_final.drop(columns=['time'], inplace=True)
-         print("  已从最终用户行为数据中移除原始 'time' 列.")
+         print("  已从P相关用户行为数据中移除原始 'time' 列.")
 
     output_file_path = os.path.join(interim_path, PROCESSED_USER_LOG_FILENAME)
     df_user_final.to_parquet(output_file_path, index=False, engine='pyarrow')
-    print(f"  处理后的用户行为数据 (P相关) 已保存到: {output_file_path}")
+    print(f"  处理后的P相关用户行为数据已保存到: {output_file_path}")
 
     print(f"\n  用户行为数据处理总结:")
     print(f"    总原始行数处理: {total_original_rows}")
